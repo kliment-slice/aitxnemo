@@ -14,7 +14,7 @@ export function Chat() {
 
   const { messages, setMessages, sendMessage, status, stop } = useChat({
     id: chatId,
-    api: `${API_URL}/api/chat`,
+    apiUrl: `${API_URL}/api/chat`,
     onError: (error: Error) => {
       if (error.message.includes("Too many requests")) {
         toast.error(
