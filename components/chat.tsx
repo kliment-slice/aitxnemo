@@ -15,7 +15,7 @@ export function Chat() {
   const { messages, setMessages, sendMessage, status, stop } = useChat({
     id: chatId,
     transport: new DefaultChatTransport({
-      api: "/api/chat",
+      api: `${process.env.NEXT_PUBLIC_API_URL}/api/chat`,
     }),
     onError: (error: Error) => {
       if (error.message.includes("Too many requests")) {
