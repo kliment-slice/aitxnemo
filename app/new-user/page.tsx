@@ -29,6 +29,10 @@ export default function NewUserPage() {
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [userLocation, setUserLocation] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -42,6 +46,28 @@ export default function NewUserPage() {
     startRecording,
     stopRecording,
   } = useVoiceRecording();
+
+  // Get user's current location
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setUserLocation({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          });
+        },
+        (error) => {
+          console.error("Error getting location:", error);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0,
+        }
+      );
+    }
+  }, []);
 
   // Cleanup on unmount
   useEffect(
@@ -254,6 +280,12 @@ export default function NewUserPage() {
       const formData = new FormData();
       formData.append("text", prompt);
 
+      // Include user's current location coordinates
+      if (userLocation) {
+        formData.append("latitude", userLocation.latitude.toString());
+        formData.append("longitude", userLocation.longitude.toString());
+      }
+
       if (attachment) {
         formData.append("attachments", attachment, attachment.name);
       }
@@ -281,7 +313,7 @@ export default function NewUserPage() {
     } finally {
       setIsSubmitting(false);
     }
-  }, [prompt, attachment, preview]);
+  }, [prompt, attachment, preview, userLocation]);
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-black">

@@ -1,4 +1,5 @@
 import os
+import json
 from typing import List, Dict, Optional
 from datetime import datetime
 from upstash_redis import Redis
@@ -36,7 +37,7 @@ class ContextBusClient:
         }
 
         if metadata:
-            event_data["metadata"] = str(metadata)
+            event_data["metadata"] = json.dumps(metadata)
 
         # Add to stream with auto-generated ID
         # upstash-redis signature: xadd(key, id, data, maxlen=None, ...)
@@ -69,7 +70,7 @@ class ContextBusClient:
         }
 
         if metadata:
-            event_data["metadata"] = str(metadata)
+            event_data["metadata"] = json.dumps(metadata)
 
         event_id = self.redis.xadd(
             key=self.FILTERED_STREAM_KEY,
@@ -171,3 +172,27 @@ class ContextBusClient:
             filtered_id = self.add_filtered_event(prompt, filter_reason="relevant")
 
         return main_id, filtered_id
+
+    def delete_event(self, event_id: str, from_filtered: bool = True) -> bool:
+        """
+        Delete an event from the Redis streams
+
+        Args:
+            event_id: The ID of the event to delete
+            from_filtered: Whether to also delete from filtered stream
+
+        Returns:
+            True if deletion was successful
+        """
+        try:
+            # Delete from main stream
+            self.redis.xdel(self.STREAM_KEY, event_id)
+
+            # Also delete from filtered stream if requested
+            if from_filtered:
+                self.redis.xdel(self.FILTERED_STREAM_KEY, event_id)
+
+            return True
+        except Exception as e:
+            print(f"Error deleting event {event_id}: {e}")
+            return False

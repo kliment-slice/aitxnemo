@@ -47,8 +47,8 @@ app.add_middleware(
 # Initialize Context Bus client (lazy initialization to prevent startup crashes)
 context_bus = None
 
-COSMOS_MODEL = "nvidia/cosmos-nemotron-34b-instruct"
-NEMOTRON_MODEL = "nvidia/nemotron-nano-9b-v2"
+COSMOS_MODEL = "nvidia/vila"
+NEMOTRON_MODEL = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
 TOOLHOUSE_AGENT_URL = os.getenv("TOOLHOUSE_AGENT_URL", None)
 
 
@@ -241,16 +241,92 @@ async def build_cosmos_content(
     return content, metadata
 
 
+def extract_coordinates_from_response(response_data: Dict) -> Optional[Dict[str, float]]:
+    """
+    Extract latitude and longitude from Toolhouse agent response.
+
+    Returns:
+        Dict with 'latitude' and 'longitude' keys, or None if not found.
+    """
+    try:
+        import re
+
+        # Try to find coordinates in the result
+        result = response_data.get("result", {})
+
+        print(f"[extract_coordinates] Searching in result: {result}")
+
+        # Check if coordinates are directly in the result
+        if isinstance(result, dict):
+            if "latitude" in result and "longitude" in result:
+                coords = {
+                    "latitude": float(result["latitude"]),
+                    "longitude": float(result["longitude"])
+                }
+                print(f"[extract_coordinates] Found direct fields: {coords}")
+                return coords
+
+            # Check in output text for coordinate patterns
+            output = result.get("output", "")
+
+            # Also check other common field names
+            if not output:
+                output = result.get("text", "")
+            if not output:
+                output = result.get("content", "")
+            if not output:
+                output = str(result)
+
+            print(f"[extract_coordinates] Searching in text: {output[:200]}...")
+
+            if isinstance(output, str):
+                # Look for patterns like "latitude: 37.7749, longitude: -122.4194"
+                coord_pattern = r"latitude:\s*(-?\d+\.?\d*),?\s*longitude:\s*(-?\d+\.?\d*)"
+                coord_match = re.search(coord_pattern, output, re.IGNORECASE)
+
+                if coord_match:
+                    coords = {
+                        "latitude": float(coord_match.group(1)),
+                        "longitude": float(coord_match.group(2))
+                    }
+                    print(f"[extract_coordinates] Found with coord_pattern: {coords}")
+                    return coords
+
+                # Fallback: Look for lat/lng patterns
+                lat_pattern = r"(?:lat(?:itude)?[:\s]+)(-?\d+\.?\d*)"
+                lng_pattern = r"(?:lng|lon(?:gitude)?[:\s]+)(-?\d+\.?\d*)"
+
+                lat_match = re.search(lat_pattern, output, re.IGNORECASE)
+                lng_match = re.search(lng_pattern, output, re.IGNORECASE)
+
+                if lat_match and lng_match:
+                    coords = {
+                        "latitude": float(lat_match.group(1)),
+                        "longitude": float(lng_match.group(1))
+                    }
+                    print(f"[extract_coordinates] Found with lat/lng pattern: {coords}")
+                    return coords
+
+        print(f"[extract_coordinates] No coordinates found in response")
+        return None
+    except Exception as e:
+        print(f"[extract_coordinates] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 async def trigger_toolhouse_agent(
     summary: str,
     severity: str,
     raw_text: str,
+    extract_coordinates: bool = False,
 ) -> Dict:
     """
     Trigger Toolhouse agent via the streaming API endpoint.
 
     Returns:
-        Dict with status information.
+        Dict with status information and optionally extracted coordinates.
     """
     if not TOOLHOUSE_AGENT_URL:
         return {
@@ -258,15 +334,33 @@ async def trigger_toolhouse_agent(
         }
 
     # Build the payload for the agent
-    payload = {
-        "summary": summary,
-        "severity": severity,
-        "raw_report": raw_text,
-        "instructions": (
-            "Leverage Google Maps via the MCP server to validate congestion, "
-            "suggest detours, and surface navigation notes for control rooms."
-        ),
-    }
+    if extract_coordinates:
+        # Extract location from the raw text and add context
+        location_hint = raw_text if raw_text else summary
+
+        payload = {
+            "message": (
+                f"GEOCODE THIS LOCATION WITH HIGH PRECISION: {location_hint}\n\n"
+                "If the location doesn't specify a city, assume it's in Austin, Texas.\n\n"
+                "REQUIRED: Use the Google Maps geocoding tool to get PRECISE coordinates for the exact intersection or location.\n"
+                "For street intersections, geocode the EXACT intersection point, not nearby addresses.\n"
+                "Return your response in this exact format with at least 4 decimal places:\n"
+                "latitude: XX.XXXX, longitude: YY.YYYY\n\n"
+                "Then provide traffic conditions and alternate routes.\n\n"
+                "DO NOT ask for more information. DO NOT say you cannot retrieve coordinates. "
+                "You MUST use the geocoding tool available to you and provide the most accurate coordinates possible."
+            ),
+        }
+    else:
+        payload = {
+            "summary": summary,
+            "severity": severity,
+            "raw_report": raw_text,
+            "instructions": (
+                "Leverage Google Maps via the MCP server to validate congestion, "
+                "suggest detours, and surface navigation notes for control rooms."
+            ),
+        }
 
     headers = {
         "Content-Type": "application/json",
@@ -444,6 +538,8 @@ class ContextEvent(BaseModel):
 async def process_traffic_intake(
     text: str = Form(""),
     display_name: Optional[str] = Form(None),
+    latitude: Optional[str] = Form(None),
+    longitude: Optional[str] = Form(None),
     attachments: Optional[List[UploadFile]] = File(None),
 ):
     """Handle multimodal traffic intake, filtering, and routing."""
@@ -466,7 +562,7 @@ async def process_traffic_intake(
     attachments_list = attachments or []
 
     try:
-        content_blocks, attachment_meta = await build_cosmos_content(
+        _, attachment_meta = await build_cosmos_content(
             text,
             attachments_list,
         )
@@ -478,52 +574,73 @@ async def process_traffic_intake(
             detail=f"Failed to prepare attachments: {exc}",
         ) from exc
 
-    cosmos_response = client.responses.create(
-        model=COSMOS_MODEL,
-        input=[
-            {
-                "role": "user",
-                "content": content_blocks,
-            }
-        ],
-        temperature=0.2,
-        max_output_tokens=512,
-    )
+    # Build a text representation of the content for the summary
+    text_content = text.strip() if text.strip() else "Traffic report with attachments"
 
-    cosmos_summary = extract_output_text(cosmos_response).strip()
-    if not cosmos_summary:
-        cosmos_summary = "No summary generated by Cosmos."
+    # Try to get AI summary, but continue if it fails
+    cosmos_summary = text_content
+    try:
+        cosmos_response = client.chat.completions.create(
+            model=COSMOS_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"{text_content}\n\n"
+                        "Summarize this traffic report in under 120 words. "
+                        "Identify the location, root cause, lanes or routes affected, "
+                        "and immediate operational recommendations."
+                    ),
+                }
+            ],
+            temperature=0.2,
+            max_tokens=512,
+        )
+        cosmos_summary = cosmos_response.choices[0].message.content.strip() if cosmos_response.choices else text_content
+    except Exception as e:
+        print(f"Warning: Cosmos summary failed: {e}")
+        cosmos_summary = text_content
 
-    evaluation_prompt = (
-        "You are the NVIDIA Nemotron Nano-9B traffic incident evaluator. "
-        "Determine whether the following report requires escalation into the Context Highway. "
-        "Return a JSON object with keys: include_in_context (boolean), severity (low|medium|high), "
-        "summary (refined concise synopsis), and reason (short explanation). "
-        "Cosmos Summary:\n"
-        f"{cosmos_summary}\n\n"
-        "Original Operator Text:\n"
-        f"{text.strip() or 'N/A'}"
-    )
+    # Default evaluation payload
+    evaluation_payload = {
+        "include_in_context": True,
+        "severity": "medium",
+        "summary": cosmos_summary,
+        "reason": "Traffic report submitted by operator"
+    }
 
-    evaluation_response = client.responses.create(
-        model=NEMOTRON_MODEL,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": evaluation_prompt,
-                    }
-                ],
-            }
-        ],
-        temperature=0.1,
-        max_output_tokens=256,
-    )
+    # Try to get AI evaluation, but use defaults if it fails
+    try:
+        evaluation_prompt = (
+            "You are the NVIDIA Nemotron Nano-9B traffic incident evaluator. "
+            "Determine whether the following report requires escalation into the Context Highway. "
+            "Return a JSON object with keys: include_in_context (boolean), severity (low|medium|high), "
+            "summary (refined concise synopsis), and reason (short explanation). "
+            "Report:\n"
+            f"{cosmos_summary}\n\n"
+            "Original Text:\n"
+            f"{text.strip() or 'N/A'}"
+        )
 
-    evaluation_text = extract_output_text(evaluation_response)
-    evaluation_payload = extract_json_block(evaluation_text)
+        evaluation_response = client.chat.completions.create(
+            model=NEMOTRON_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": evaluation_prompt,
+                }
+            ],
+            temperature=0.1,
+            max_tokens=256,
+        )
+
+        evaluation_text = evaluation_response.choices[0].message.content if evaluation_response.choices else ""
+        parsed_payload = extract_json_block(evaluation_text)
+        if parsed_payload:
+            evaluation_payload = parsed_payload
+    except Exception as e:
+        print(f"Warning: Nemotron evaluation failed: {e}")
+        # evaluation_payload already has defaults
 
     include_flag = bool(evaluation_payload.get("include_in_context"))
     severity = str(evaluation_payload.get("severity", "unknown")).lower()
@@ -542,6 +659,46 @@ async def process_traffic_intake(
         "source": "traffic-intake",
     }
 
+    # Always try to extract coordinates from the text using Toolhouse agent
+    # This ensures we get the location mentioned in the report, not the user's GPS location
+    extracted_coords = None
+    if text.strip():
+        print(f"[Toolhouse] Calling agent to extract coordinates from text: {text[:100]}...")
+        toolhouse_coord_result = await trigger_toolhouse_agent(
+            summary=refined_summary,
+            severity=severity,
+            raw_text=text,
+            extract_coordinates=True,
+        )
+
+        print(f"[Toolhouse] Agent response status: {toolhouse_coord_result.get('status')}")
+        print(f"[Toolhouse] Full response: {toolhouse_coord_result}")
+
+        if toolhouse_coord_result.get("status") == "completed":
+            extracted_coords = extract_coordinates_from_response(toolhouse_coord_result)
+            print(f"[Toolhouse] Extracted coordinates: {extracted_coords}")
+
+            if extracted_coords:
+                # Use Toolhouse-extracted coordinates (from the report text)
+                # OVERRIDE any user GPS coordinates
+                # Ensure we preserve full precision (no rounding)
+                latitude = f"{extracted_coords['latitude']:.10f}".rstrip('0').rstrip('.')
+                longitude = f"{extracted_coords['longitude']:.10f}".rstrip('0').rstrip('.')
+                print(f"✓ Using Toolhouse coordinates (full precision): {latitude}, {longitude}")
+            else:
+                print("⚠ Toolhouse couldn't extract coordinates from response")
+                if latitude and longitude:
+                    print(f"⚠ Falling back to user GPS coordinates: {latitude}, {longitude}")
+        else:
+            print(f"⚠ Toolhouse call failed with status: {toolhouse_coord_result.get('status')}")
+            if latitude and longitude:
+                print(f"⚠ Falling back to user GPS coordinates: {latitude}, {longitude}")
+
+    # Add coordinates to metadata if available
+    if latitude and longitude:
+        context_metadata["latitude"] = latitude
+        context_metadata["longitude"] = longitude
+
     bus = get_context_bus()
     if bus:
         try:
@@ -559,13 +716,9 @@ async def process_traffic_intake(
         except Exception as exc:
             print(f"Warning: Failed to store traffic intake in context bus: {exc}")
 
-    toolhouse_result: Dict = {"status": "skipped"}
-    if include_flag:
-        toolhouse_result = await trigger_toolhouse_agent(
-            summary=refined_summary,
-            severity=severity,
-            raw_text=text,
-        )
+    # We already extracted coordinates above, so we can skip the second Toolhouse call
+    # The coordinate extraction call already provides traffic analysis in its response
+    toolhouse_result: Dict = {"status": "skipped - coordinates already extracted"}
 
     evaluation_payload.update(
         {
@@ -608,6 +761,91 @@ async def add_context_event(event: ContextEvent):
             "success": True,
             "main_event_id": main_id,
             "filtered_event_id": filtered_id
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+class FlagEventRequest(BaseModel):
+    event_id: str
+    update: str
+    original_prompt: str
+
+
+@app.post("/api/context-bus/flag")
+async def flag_event(request: FlagEventRequest):
+    """Flag an event with an update report"""
+    try:
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+
+        # Add the update as a new event to the context bus
+        update_metadata = {
+            "type": "update",
+            "original_event_id": request.event_id,
+            "original_prompt": request.original_prompt,
+            "source": "flag-update"
+        }
+
+        update_id = bus.add_event(
+            prompt=f"UPDATE: {request.update}",
+            metadata=update_metadata
+        )
+
+        # Also add to filtered stream
+        filtered_id = bus.add_filtered_event(
+            prompt=f"UPDATE: {request.update}",
+            filter_reason="event_update",
+            metadata=update_metadata
+        )
+
+        return {
+            "success": True,
+            "update_id": update_id,
+            "filtered_id": filtered_id
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+class ArchiveEventRequest(BaseModel):
+    event_id: str
+
+
+@app.post("/api/context-bus/archive")
+async def archive_event(request: ArchiveEventRequest):
+    """Archive (delete) an event from the context bus"""
+    try:
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+
+        # Delete the event from both Redis streams
+        success = bus.delete_event(request.event_id, from_filtered=True)
+
+        if not success:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Failed to delete event from Redis"}
+            )
+
+        return {
+            "success": True,
+            "event_id": request.event_id,
+            "message": "Event permanently deleted from context bus"
         }
     except Exception as e:
         return JSONResponse(
