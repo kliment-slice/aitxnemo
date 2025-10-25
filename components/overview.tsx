@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import Image from "next/image";
 import { Database, ArrowRight, Zap, Filter } from "lucide-react";
 import { useState, useEffect } from "react";
+import { API_URL } from "@/lib/api";
 
 interface ContextEvent {
   id: string;
@@ -23,13 +24,13 @@ export const Overview = () => {
     const fetchData = async () => {
       try {
         // Fetch stats
-        const statsRes = await fetch("http://localhost:8000/api/context-bus/stats");
+        const statsRes = await fetch(`${API_URL}/api/context-bus/stats`);
         const stats = await statsRes.json();
         setTotalEvents(stats.total_events || 0);
         setFilteredEvents(stats.filtered_events || 0);
 
         // Fetch filtered events
-        const eventsRes = await fetch("http://localhost:8000/api/context-bus/filtered?count=5");
+        const eventsRes = await fetch(`${API_URL}/api/context-bus/filtered?count=5`);
         const eventsData = await eventsRes.json();
 
         if (eventsData.events && eventsData.events.length > 0) {

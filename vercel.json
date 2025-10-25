@@ -1,21 +1,5 @@
 {
-  "builds": [
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "api/index.py"
-    }
-  ],
-  "functions": {
-    "api/index.py": {
-      "excludeFiles": "{.next,.git,node_modules,__pycache__}/**",
-      "memory": 1024,
-      "maxDuration": 30
-    }
-  }
+  "buildCommand": "npm run build",
+  "framework": "nextjs",
+  "installCommand": "npm install"
 }
