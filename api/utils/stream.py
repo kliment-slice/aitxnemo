@@ -31,21 +31,37 @@ def stream_text(
         yield format_sse({"type": "start", "messageId": message_id})
 
         # Use NVIDIA Nemotron model with reasoning capabilities
-        stream = client.chat.completions.create(
-            messages=messages,
-            model="nvidia/nvidia-nemotron-nano-9b-v2",
-            stream=True,
-            tools=tool_definitions,
-            temperature=0.6,
-            top_p=0.95,
-            max_tokens=2048,
-            frequency_penalty=0,
-            presence_penalty=0,
-            extra_body={
-                "min_thinking_tokens": 1024,
-                "max_thinking_tokens": 2048
-            }
-        )
+        # Try with reasoning params first, fall back to basic if not supported
+        try:
+            stream = client.chat.completions.create(
+                messages=messages,
+                model="nvidia/nvidia-nemotron-nano-9b-v2",
+                stream=True,
+                tools=tool_definitions,
+                temperature=0.6,
+                top_p=0.95,
+                max_tokens=2048,
+                frequency_penalty=0,
+                presence_penalty=0,
+                extra_body={
+                    "min_thinking_tokens": 1024,
+                    "max_thinking_tokens": 2048
+                }
+            )
+        except Exception as e:
+            print(f"Failed with reasoning params, trying without: {e}")
+            # Fall back to basic completion without reasoning
+            stream = client.chat.completions.create(
+                messages=messages,
+                model="nvidia/nvidia-nemotron-nano-9b-v2",
+                stream=True,
+                tools=tool_definitions,
+                temperature=0.6,
+                top_p=0.95,
+                max_tokens=2048,
+                frequency_penalty=0,
+                presence_penalty=0
+            )
 
         for chunk in stream:
             for choice in chunk.choices:

@@ -5,6 +5,7 @@ import Image from "next/image";
 import { Database, ArrowRight, Zap, Filter } from "lucide-react";
 import { useState, useEffect } from "react";
 import { API_URL } from "@/lib/api";
+import { TrafficMap } from "./traffic-map";
 
 interface ContextEvent {
   id: string;
@@ -98,8 +99,21 @@ export const Overview = () => {
         </div>
       </div>
 
-      {/* Event Stream Visualization */}
-      <div className="flex-1 overflow-hidden p-6">
+      {/* Split View: Map + Event Stream */}
+      <div className="flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-2 gap-0">
+        {/* Live Traffic Map */}
+        <div className="relative border-r-2 border-nvidia-green/30">
+          <TrafficMap className="h-full min-h-[500px]" />
+          <div className="absolute top-4 left-4 bg-black/80 backdrop-blur border border-nvidia-green/30 rounded-xl px-4 py-2 shadow-[0_0_20px_rgba(0,255,170,0.2)]">
+            <div className="flex items-center gap-2">
+              <div className="h-2 w-2 bg-nvidia-green rounded-full animate-pulse"></div>
+              <span className="text-xs font-semibold text-nvidia-green">LIVE TRAFFIC MAP</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Event Stream Visualization */}
+        <div className="flex-1 overflow-hidden p-6">
         <div className="max-w-7xl mx-auto">
           {/* Pipeline Flow */}
           <div className="mb-6 flex items-center justify-center gap-4 text-sm">
@@ -127,7 +141,7 @@ export const Overview = () => {
             </div>
             {events.length === 0 && !loading && (
               <div className="text-center p-8 text-muted-foreground">
-                No events yet. Start a conversation to populate the Context Highway.
+                No signals yet. Use the Contribute Context portal to populate the Context Highway.
               </div>
             )}
             {events.map((event, index) => {
@@ -184,9 +198,10 @@ export const Overview = () => {
             className="mt-8 text-center"
           >
             <p className="text-sm text-muted-foreground">
-              Start a conversation to add events to the Context Highway
+              Use the Contribute Context link to keep the memory stream live.
             </p>
           </motion.div>
+        </div>
         </div>
       </div>
     </motion.div>
