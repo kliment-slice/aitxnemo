@@ -1,0 +1,7 @@
+# Ignore Python/FastAPI backend - deployed separately to Railway
+api/
+*.py
+__pycache__/
+*.pyc
+.env
+requirements.txt
