@@ -7,12 +7,14 @@ import { useScrollToBottom } from "@/hooks/use-scroll-to-bottom";
 import { useChat, type CreateUIMessage, type UIMessage } from "@ai-sdk/react";
 import { toast } from "sonner";
 import React from "react";
+import { API_URL } from "@/lib/api";
 
 export function Chat() {
   const chatId = "001";
 
   const { messages, setMessages, sendMessage, status, stop } = useChat({
     id: chatId,
+    api: `${API_URL}/api/chat`,
     onError: (error: Error) => {
       if (error.message.includes("Too many requests")) {
         toast.error(
