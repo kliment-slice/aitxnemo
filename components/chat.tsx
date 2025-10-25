@@ -4,17 +4,19 @@ import { PreviewMessage, ThinkingMessage } from "@/components/message";
 import { MultimodalInput } from "@/components/multimodal-input";
 import { Overview } from "@/components/overview";
 import { useScrollToBottom } from "@/hooks/use-scroll-to-bottom";
-import { useChat, type CreateUIMessage, type UIMessage } from "@ai-sdk/react";
+import { useChat, type UIMessage } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
 import { toast } from "sonner";
 import React from "react";
-import { API_URL } from "@/lib/api";
 
 export function Chat() {
   const chatId = "001";
 
   const { messages, setMessages, sendMessage, status, stop } = useChat({
     id: chatId,
-    apiUrl: `${API_URL}/api/chat`,
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+    }),
     onError: (error: Error) => {
       if (error.message.includes("Too many requests")) {
         toast.error(
