@@ -32,8 +32,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Context Bus client
-context_bus = ContextBusClient()
+# Initialize Context Bus client (lazy initialization to prevent startup crashes)
+context_bus = None
+
+def get_context_bus():
+    """Lazy initialization of context bus to handle connection errors gracefully"""
+    global context_bus
+    if context_bus is None:
+        try:
+            context_bus = ContextBusClient()
+        except Exception as e:
+            print(f"Warning: Failed to initialize ContextBusClient: {e}")
+            # Return None to allow app to continue without context bus
+            return None
+    return context_bus
 
 
 class Request(BaseModel):
@@ -90,7 +102,13 @@ async def speech_to_text(audio: UploadFile = File(...)):
 async def get_context_events(count: int = Query(10, ge=1, le=100)):
     """Get recent events from the context bus"""
     try:
-        events = context_bus.get_recent_events(count=count)
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+        events = bus.get_recent_events(count=count)
         return {"events": events, "count": len(events)}
     except Exception as e:
         return JSONResponse(
@@ -103,7 +121,13 @@ async def get_context_events(count: int = Query(10, ge=1, le=100)):
 async def get_filtered_events(count: int = Query(10, ge=1, le=100)):
     """Get recent filtered events from the memory bank"""
     try:
-        events = context_bus.get_filtered_events(count=count)
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+        events = bus.get_filtered_events(count=count)
         return {"events": events, "count": len(events)}
     except Exception as e:
         return JSONResponse(
@@ -116,7 +140,13 @@ async def get_filtered_events(count: int = Query(10, ge=1, le=100)):
 async def get_context_stats():
     """Get statistics about the context bus streams"""
     try:
-        stats = context_bus.get_stream_info()
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+        stats = bus.get_stream_info()
         return stats
     except Exception as e:
         return JSONResponse(
@@ -135,7 +165,13 @@ class ContextEvent(BaseModel):
 async def add_context_event(event: ContextEvent):
     """Add a new event to the context bus"""
     try:
-        main_id, filtered_id = context_bus.filter_and_store(
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+        main_id, filtered_id = bus.filter_and_store(
             prompt=event.prompt,
             should_filter=event.should_filter
         )
@@ -153,31 +189,48 @@ async def add_context_event(event: ContextEvent):
 
 @app.post("/api/chat")
 async def handle_chat_data(request: Request, protocol: str = Query('data')):
-    messages = request.messages
-    openai_messages = convert_to_openai_messages(messages)
+    try:
+        messages = request.messages
+        openai_messages = convert_to_openai_messages(messages)
 
-    # Add user message to context bus
-    if messages and len(messages) > 0:
-        last_message = messages[-1]
-        if hasattr(last_message, 'parts') and last_message.parts:
-            for part in last_message.parts:
-                if hasattr(part, 'type') and part.type == 'text' and hasattr(part, 'text'):
-                    # Add to context bus (will be filtered)
-                    context_bus.filter_and_store(part.text, should_filter=True)
-                    break
+        # Add user message to context bus
+        if messages and len(messages) > 0:
+            last_message = messages[-1]
+            if hasattr(last_message, 'parts') and last_message.parts:
+                for part in last_message.parts:
+                    if hasattr(part, 'type') and part.type == 'text' and hasattr(part, 'text'):
+                        # Add to context bus (will be filtered)
+                        try:
+                            bus = get_context_bus()
+                            if bus:
+                                bus.filter_and_store(part.text, should_filter=True)
+                        except Exception as e:
+                            print(f"Warning: Failed to store in context bus: {e}")
+                        break
 
-    # Initialize OpenAI client with NVIDIA API
-    nvidia_api_key = os.getenv("NVIDIA_API_KEY")
-    if not nvidia_api_key:
-        raise ValueError("NVIDIA_API_KEY not found in environment variables")
+        # Initialize OpenAI client with NVIDIA API
+        nvidia_api_key = os.getenv("NVIDIA_API_KEY")
+        if not nvidia_api_key:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "NVIDIA_API_KEY not configured"}
+            )
 
-    client = OpenAI(
-        api_key=nvidia_api_key,
-        base_url="https://integrate.api.nvidia.com/v1"
-    )
+        client = OpenAI(
+            api_key=nvidia_api_key,
+            base_url="https://integrate.api.nvidia.com/v1"
+        )
 
-    response = StreamingResponse(
-        stream_text(client, openai_messages, TOOL_DEFINITIONS, AVAILABLE_TOOLS, protocol),
-        media_type="text/event-stream",
-    )
-    return patch_response_with_headers(response, protocol)
+        response = StreamingResponse(
+            stream_text(client, openai_messages, TOOL_DEFINITIONS, AVAILABLE_TOOLS, protocol),
+            media_type="text/event-stream",
+        )
+        return patch_response_with_headers(response, protocol)
+    except Exception as e:
+        print(f"Error in handle_chat_data: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__}
+        )
