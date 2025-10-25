@@ -93,33 +93,37 @@ class ContextBusClient:
         """
         key = stream_key or self.STREAM_KEY
 
-        # Read last N events using XREVRANGE
-        events = self.redis.xrevrange(key, "+", "-", count=count)
+        try:
+            # Read last N events using XREVRANGE
+            events = self.redis.xrevrange(key, "+", "-", count=count)
 
-        if not events:
+            if not events:
+                return []
+
+            # Format events
+            # xrevrange returns: [[id, [k1, v1, k2, v2, ...]], ...]
+            formatted_events = []
+            for event_entry in events:
+                event_id = event_entry[0]
+                event_fields = event_entry[1]
+
+                # Convert flat list [k1, v1, k2, v2] to dict
+                event_data = {}
+                for i in range(0, len(event_fields), 2):
+                    key_name = event_fields[i]
+                    value = event_fields[i + 1]
+                    event_data[key_name] = value
+
+                event = {
+                    "id": event_id,
+                    **event_data
+                }
+                formatted_events.append(event)
+
+            return formatted_events
+        except Exception:
+            # Stream might not exist yet
             return []
-
-        # Format events
-        # xrevrange returns: [[id, [k1, v1, k2, v2, ...]], ...]
-        formatted_events = []
-        for event_entry in events:
-            event_id = event_entry[0]
-            event_fields = event_entry[1]
-
-            # Convert flat list [k1, v1, k2, v2] to dict
-            event_data = {}
-            for i in range(0, len(event_fields), 2):
-                key_name = event_fields[i]
-                value = event_fields[i + 1]
-                event_data[key_name] = value
-
-            event = {
-                "id": event_id,
-                **event_data
-            }
-            formatted_events.append(event)
-
-        return formatted_events
 
     def get_filtered_events(self, count: int = 10) -> List[Dict]:
         """Get recent filtered events from the memory bank"""
