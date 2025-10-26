@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { API_URL } from '@/lib/api';
 
 export function useVoiceRecording() {
   const [isRecording, setIsRecording] = useState(false);
@@ -116,12 +117,18 @@ export function useVoiceRecording() {
 
           console.log(`[Voice] Sending to STT API: ${filename}, ${audioBlob.size} bytes`);
 
-          const response = await fetch('/api/speech-to-text', {
+          const response = await fetch(`${API_URL}/api/speech-to-text`, {
             method: 'POST',
             body: formData,
           });
 
           if (!response.ok) {
+            // Handle specific case where backend might not be available
+            if (response.status === 405 || response.status === 404) {
+              console.error('[Voice] STT API not available:', response.status);
+              throw new Error('Speech-to-text service is currently unavailable. Please try again later.');
+            }
+
             const errorText = await response.text();
             let errorData;
             try {
@@ -160,7 +167,13 @@ export function useVoiceRecording() {
           // Stop all tracks even on error
           const tracks = recorder.stream?.getTracks() || [];
           tracks.forEach(track => track.stop());
-          reject(error);
+
+          // Provide specific error messages for common network issues
+          if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+            reject(new Error('Unable to connect to speech-to-text service. Please check your internet connection and try again.'));
+          } else {
+            reject(error);
+          }
         }
       };
 

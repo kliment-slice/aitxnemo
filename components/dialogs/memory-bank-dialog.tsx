@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { API_URL } from "@/lib/api";
+import { API_URL, fetchWithFallback } from "@/lib/api";
 import { RefreshCw, Clock, User, MapPin } from "lucide-react";
 import { EventsTimeline } from "@/components/ui/simple-chart";
 
@@ -34,24 +34,32 @@ export function MemoryBankDialog({ open, onOpenChange }: MemoryBankDialogProps) 
   const fetchMemoryEvents = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_URL}/api/context-bus/filtered?count=50`);
-      const data = await response.json();
-      setEvents(data.events || []);
+      const data = await fetchWithFallback(`${API_URL}/api/context-bus/filtered?count=50`);
 
-      // Calculate stats
-      const now = new Date();
-      const last24h = data.events.filter((event: MemoryEvent) => {
-        const eventTime = new Date(event.timestamp);
-        return now.getTime() - eventTime.getTime() < 24 * 60 * 60 * 1000;
-      }).length;
+      if (data && data.events) {
+        setEvents(data.events || []);
 
-      setStats({
-        total: data.events.length,
-        last24h,
-        avgPerHour: last24h / 24,
-      });
+        // Calculate stats
+        const now = new Date();
+        const last24h = data.events.filter((event: MemoryEvent) => {
+          const eventTime = new Date(event.timestamp);
+          return now.getTime() - eventTime.getTime() < 24 * 60 * 60 * 1000;
+        }).length;
+
+        setStats({
+          total: data.events.length,
+          last24h,
+          avgPerHour: last24h / 24,
+        });
+      } else {
+        // API not available, set empty state
+        setEvents([]);
+        setStats({ total: 0, last24h: 0, avgPerHour: 0 });
+      }
     } catch (error) {
       console.error("Error fetching memory events:", error);
+      setEvents([]);
+      setStats({ total: 0, last24h: 0, avgPerHour: 0 });
     } finally {
       setLoading(false);
     }

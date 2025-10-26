@@ -18,6 +18,7 @@ import { toast } from "sonner";
 
 import { useVoiceRecording } from "@/hooks/use-voice-recording";
 import { cn } from "@/lib/utils";
+import { API_URL } from "@/lib/api";
 
 const MAX_VIDEO_DURATION = 5000; // 5 seconds in milliseconds
 
@@ -59,13 +60,45 @@ export default function NewUserPage() {
         },
         (error) => {
           console.error("Error getting location:", error);
+
+          // Try to get approximate location from IP geolocation as fallback
+          fetch('https://ipapi.co/json/')
+            .then(response => response.json())
+            .then(data => {
+              if (data.latitude && data.longitude) {
+                setUserLocation({
+                  latitude: data.latitude,
+                  longitude: data.longitude,
+                });
+                console.log("Using approximate location based on IP address");
+              }
+            })
+            .catch(() => {
+              console.log("Unable to get any location data");
+            });
         },
         {
           enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0,
+          timeout: 15000, // Increased timeout for production
+          maximumAge: 300000, // Cache location for 5 minutes
         }
       );
+    } else {
+      // Try IP geolocation fallback if geolocation is not supported
+      fetch('https://ipapi.co/json/')
+        .then(response => response.json())
+        .then(data => {
+          if (data.latitude && data.longitude) {
+            setUserLocation({
+              latitude: data.latitude,
+              longitude: data.longitude,
+            });
+            console.log("Using IP-based location");
+          }
+        })
+        .catch(() => {
+          console.log("Geolocation not supported and IP location failed");
+        });
     }
   }, []);
 
@@ -290,13 +323,17 @@ export default function NewUserPage() {
         formData.append("attachments", attachment, attachment.name);
       }
 
-      const response = await fetch("/api/traffic-intake", {
+      const response = await fetch(`${API_URL}/api/traffic-intake`, {
         method: "POST",
         body: formData,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
+        // Handle specific case where backend might not be available
+        if (response.status === 405 || response.status === 404) {
+          throw new Error("Backend API not available. Please try again later.");
+        }
         throw new Error(errorText || "Failed to process submission");
       }
 
@@ -309,7 +346,15 @@ export default function NewUserPage() {
       }
     } catch (error) {
       console.error("Traffic intake failed:", error);
-      toast.error("Unable to submit report right now.");
+      if (error instanceof Error) {
+        if (error.message.includes("Backend API not available")) {
+          toast.error("Backend service is currently unavailable. Please try again later.");
+        } else {
+          toast.error(`Unable to submit report: ${error.message}`);
+        }
+      } else {
+        toast.error("Unable to submit report right now.");
+      }
     } finally {
       setIsSubmitting(false);
     }

@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 
 import { Button } from "./ui/button";
-import { API_URL } from "@/lib/api";
+import { API_URL, fetchWithFallback } from "@/lib/api";
 import { MemoryBankDialog } from "./dialogs/memory-bank-dialog";
 import { FilteredEventsDialog } from "./dialogs/filtered-events-dialog";
 
@@ -22,12 +22,19 @@ export const Navbar = () => {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const statsRes = await fetch(`${API_URL}/api/context-bus/stats`);
-        const stats = await statsRes.json();
-        setMemoryEventsCount(stats.memory_events || 0);  // High-priority traffic content
-        setFilteredEventsCount(stats.filtered_events || 0);  // Rejected/non-traffic content
+        const stats = await fetchWithFallback(`${API_URL}/api/context-bus/stats`);
+        if (stats) {
+          setMemoryEventsCount(stats.memory_events || 0);  // High-priority traffic content
+          setFilteredEventsCount(stats.filtered_events || 0);  // Rejected/non-traffic content
+        } else {
+          // API not available, set to 0 but don't error
+          setMemoryEventsCount(0);
+          setFilteredEventsCount(0);
+        }
       } catch (error) {
         console.error("Error fetching context bus stats:", error);
+        setMemoryEventsCount(0);
+        setFilteredEventsCount(0);
       }
     };
 

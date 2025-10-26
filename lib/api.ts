@@ -14,3 +14,22 @@ export const getApiUrl = () => {
 };
 
 export const API_URL = getApiUrl();
+
+/**
+ * Utility function to handle API calls with graceful error handling
+ * Returns null when API is not available (common in deployment)
+ */
+export const fetchWithFallback = async (url: string, options?: RequestInit): Promise<any> => {
+  try {
+    const response = await fetch(url, options);
+    if (response.ok) {
+      return await response.json();
+    } else {
+      console.log(`[API] Endpoint not available (${response.status}): ${url}`);
+      return null;
+    }
+  } catch (error) {
+    console.log(`[API] Backend not available: ${url}`, error);
+    return null;
+  }
+};

@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Flag, Archive, X, TrafficCone } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { API_URL } from "@/lib/api";
+import { API_URL, fetchWithFallback } from "@/lib/api";
 import { TrafficMap } from "./traffic-map";
 import { Button } from "./ui/button";
 
@@ -31,16 +31,19 @@ export const Overview = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch filtered events
-        const eventsRes = await fetch(`${API_URL}/api/context-bus/filtered?count=5`);
-        const eventsData = await eventsRes.json();
+        // Fetch filtered events with fallback
+        const eventsData = await fetchWithFallback(`${API_URL}/api/context-bus/filtered?count=5`);
 
-        if (eventsData.events && eventsData.events.length > 0) {
+        if (eventsData?.events && eventsData.events.length > 0) {
           console.log('[Overview] Fetched events:', eventsData.events);
           setEvents(eventsData.events);
+        } else {
+          console.log('[Overview] No events available or API not accessible');
+          setEvents([]);
         }
       } catch (error) {
         console.error("Error fetching context bus data:", error);
+        setEvents([]);
       } finally {
         setLoading(false);
       }
@@ -86,6 +89,9 @@ export const Overview = () => {
       });
 
       if (!response.ok) {
+        if (response.status === 405 || response.status === 404) {
+          throw new Error("Backend API not available. Please try again later.");
+        }
         throw new Error("Failed to submit update");
       }
 
@@ -131,6 +137,9 @@ export const Overview = () => {
       });
 
       if (!response.ok) {
+        if (response.status === 405 || response.status === 404) {
+          throw new Error("Backend API not available. Please try again later.");
+        }
         throw new Error("Failed to archive event");
       }
 

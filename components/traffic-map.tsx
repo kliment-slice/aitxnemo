@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { APIProvider, Map, AdvancedMarker, useMap } from "@vis.gl/react-google-maps";
 import { MapPin, Navigation2, AlertCircle, AlertTriangle } from "lucide-react";
+import { API_URL } from "@/lib/api";
 
 interface TrafficMapProps {
   className?: string;
@@ -137,32 +138,91 @@ export function TrafficMap({ className }: TrafficMapProps) {
             lat: position.coords.latitude,
             lng: position.coords.longitude,
           });
+          setLocationError(null);
           setIsLocating(false);
         },
         (error) => {
           console.error("Error getting location:", error);
-          setLocationError(error.message);
+          let errorMessage = "Unable to determine your location.";
+
+          switch (error.code) {
+            case error.PERMISSION_DENIED:
+              errorMessage = "Location access denied. Please enable location permissions in your browser.";
+              break;
+            case error.POSITION_UNAVAILABLE:
+              errorMessage = "Location information is unavailable.";
+              break;
+            case error.TIMEOUT:
+              errorMessage = "Location request timed out. Please try again.";
+              break;
+          }
+
+          setLocationError(errorMessage);
           setIsLocating(false);
-          // Default to San Francisco if location fails
-          setUserLocation({
-            lat: 37.7749,
-            lng: -122.4194,
-          });
+
+          // Try to get approximate location from IP geolocation as fallback
+          fetch('https://ipapi.co/json/')
+            .then(response => response.json())
+            .then(data => {
+              if (data.latitude && data.longitude) {
+                setUserLocation({
+                  lat: data.latitude,
+                  lng: data.longitude,
+                });
+                setLocationError(`Using approximate location based on your IP address. For precise location, please enable GPS.`);
+              } else {
+                // Only use Austin, TX as absolute last resort
+                setUserLocation({
+                  lat: 30.2672,
+                  lng: -97.7431,
+                });
+                setLocationError(`${errorMessage} Using default location (Austin, TX). Please enable location permissions for accurate positioning.`);
+              }
+            })
+            .catch(() => {
+              // Absolute fallback to Austin, TX
+              setUserLocation({
+                lat: 30.2672,
+                lng: -97.7431,
+              });
+              setLocationError(`${errorMessage} Using default location (Austin, TX). Please enable location permissions for accurate positioning.`);
+            });
         },
         {
           enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0,
+          timeout: 15000, // Increased timeout for production
+          maximumAge: 300000, // Cache location for 5 minutes
         }
       );
     } else {
       setLocationError("Geolocation is not supported by this browser.");
       setIsLocating(false);
-      // Default to San Francisco
-      setUserLocation({
-        lat: 37.7749,
-        lng: -122.4194,
-      });
+
+      // Try IP geolocation fallback
+      fetch('https://ipapi.co/json/')
+        .then(response => response.json())
+        .then(data => {
+          if (data.latitude && data.longitude) {
+            setUserLocation({
+              lat: data.latitude,
+              lng: data.longitude,
+            });
+            setLocationError("Using approximate location. For precise location, please use a browser that supports geolocation.");
+          } else {
+            setUserLocation({
+              lat: 30.2672,
+              lng: -97.7431,
+            });
+            setLocationError("Geolocation not supported. Using default location (Austin, TX).");
+          }
+        })
+        .catch(() => {
+          setUserLocation({
+            lat: 30.2672,
+            lng: -97.7431,
+          });
+          setLocationError("Geolocation not supported. Using default location (Austin, TX).");
+        });
     }
   }, []);
 
@@ -170,7 +230,7 @@ export function TrafficMap({ className }: TrafficMapProps) {
   useEffect(() => {
     const fetchTrafficEvents = async () => {
       try {
-        const response = await fetch("/api/context-bus/filtered?count=50");
+        const response = await fetch(`${API_URL}/api/context-bus/filtered?count=50`);
         if (response.ok) {
           const data = await response.json();
           const events = data.events || [];
@@ -208,17 +268,23 @@ export function TrafficMap({ className }: TrafficMapProps) {
 
           setTrafficEvents(eventsWithCoords);
           console.log(`[TrafficMap] Loaded ${eventsWithCoords.length} events with coordinates:`, eventsWithCoords);
+        } else {
+          // Handle API endpoint not available (common in deployment)
+          console.log(`[TrafficMap] API endpoint not available (${response.status}). This is normal in deployment without backend.`);
+          setTrafficEvents([]); // Set empty array instead of erroring
         }
       } catch (error) {
-        console.error("Failed to fetch traffic events:", error);
+        // Handle network errors gracefully
+        console.log("[TrafficMap] Backend API not available. This is normal in deployment without backend:", error);
+        setTrafficEvents([]); // Set empty array instead of erroring
       }
     };
 
     // Initial fetch
     fetchTrafficEvents();
 
-    // Poll for updates every 10 seconds
-    const interval = setInterval(fetchTrafficEvents, 10000);
+    // Poll for updates every 30 seconds (less frequent since API may not be available)
+    const interval = setInterval(fetchTrafficEvents, 30000);
 
     return () => clearInterval(interval);
   }, []);
@@ -226,19 +292,43 @@ export function TrafficMap({ className }: TrafficMapProps) {
   const handleRecenter = useCallback(() => {
     if (navigator.geolocation) {
       setIsLocating(true);
+      setLocationError(null);
       navigator.geolocation.getCurrentPosition(
         (position) => {
           setUserLocation({
             lat: position.coords.latitude,
             lng: position.coords.longitude,
           });
+          setLocationError(null);
           setIsLocating(false);
         },
         (error) => {
           console.error("Error getting location:", error);
+          let errorMessage = "Unable to update your location.";
+
+          switch (error.code) {
+            case error.PERMISSION_DENIED:
+              errorMessage = "Location access denied. Please enable location permissions.";
+              break;
+            case error.POSITION_UNAVAILABLE:
+              errorMessage = "Location information is unavailable.";
+              break;
+            case error.TIMEOUT:
+              errorMessage = "Location request timed out.";
+              break;
+          }
+
+          setLocationError(errorMessage);
           setIsLocating(false);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 0, // Force fresh location for recenter
         }
       );
+    } else {
+      setLocationError("Geolocation is not supported by this browser.");
     }
   }, []);
 

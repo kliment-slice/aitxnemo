@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { API_URL } from "@/lib/api";
+import { API_URL, fetchWithFallback } from "@/lib/api";
 import { RefreshCw, Clock, User, Shield, X, Trash2 } from "lucide-react";
 import { EventsTimeline } from "@/components/ui/simple-chart";
 import { toast } from "sonner";
@@ -37,30 +37,37 @@ export function FilteredEventsDialog({ open, onOpenChange }: FilteredEventsDialo
   const fetchFilteredEvents = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_URL}/api/context-bus/rejected?count=50`);
-      const data = await response.json();
-      setEvents(data.events || []);
+      const data = await fetchWithFallback(`${API_URL}/api/context-bus/rejected?count=50`);
 
-      // Calculate stats
-      const now = new Date();
-      const last24h = data.events.filter((event: FilteredEvent) => {
-        const eventTime = new Date(event.timestamp);
-        return now.getTime() - eventTime.getTime() < 24 * 60 * 60 * 1000;
-      }).length;
+      if (data && data.events) {
+        setEvents(data.events || []);
 
-      // Get total events to calculate rejection rate
-      const statsResponse = await fetch(`${API_URL}/api/context-bus/stats`);
-      const statsData = await statsResponse.json();
-      const totalEvents = statsData.total_events || 1; // Avoid division by zero
-      const rejectionRate = ((data.events.length / totalEvents) * 100);
+        // Calculate stats
+        const now = new Date();
+        const last24h = data.events.filter((event: FilteredEvent) => {
+          const eventTime = new Date(event.timestamp);
+          return now.getTime() - eventTime.getTime() < 24 * 60 * 60 * 1000;
+        }).length;
 
-      setStats({
-        total: data.events.length,
-        last24h,
-        rejectionRate,
-      });
+        // Get total events to calculate rejection rate
+        const statsData = await fetchWithFallback(`${API_URL}/api/context-bus/stats`);
+        const totalEvents = (statsData && statsData.total_events) || 1; // Avoid division by zero
+        const rejectionRate = ((data.events.length / totalEvents) * 100);
+
+        setStats({
+          total: data.events.length,
+          last24h,
+          rejectionRate,
+        });
+      } else {
+        // API not available, set empty state
+        setEvents([]);
+        setStats({ total: 0, last24h: 0, rejectionRate: 0 });
+      }
     } catch (error) {
       console.error("Error fetching filtered events:", error);
+      setEvents([]);
+      setStats({ total: 0, last24h: 0, rejectionRate: 0 });
     } finally {
       setLoading(false);
     }
@@ -80,6 +87,10 @@ export function FilteredEventsDialog({ open, onOpenChange }: FilteredEventsDialo
       });
 
       if (!response.ok) {
+        if (response.status === 405 || response.status === 404) {
+          toast.error("Backend API not available. Cannot delete events.");
+          return;
+        }
         throw new Error("Failed to delete events");
       }
 
