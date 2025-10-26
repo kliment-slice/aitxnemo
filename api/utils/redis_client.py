@@ -8,7 +8,8 @@ class ContextBusClient:
     """Redis Stream client for managing the Context Highway event bus"""
 
     STREAM_KEY = "context:events"
-    FILTERED_STREAM_KEY = "context:filtered"
+    FILTERED_STREAM_KEY = "context:filtered"  # High-priority traffic (Memory)
+    REJECTED_STREAM_KEY = "context:rejected"  # Filtered out content (Filtered)
     MAX_STREAM_LENGTH = 1000
 
     def __init__(self):
@@ -81,6 +82,37 @@ class ContextBusClient:
 
         return event_id
 
+    def add_rejected_event(self, prompt: str, reject_reason: str = "filtered", metadata: Optional[Dict] = None) -> str:
+        """
+        Add a rejected/filtered event to the rejected stream
+
+        Args:
+            prompt: The rejected prompt
+            reject_reason: Reason for rejection (e.g., "non-traffic", "spam")
+            metadata: Optional additional metadata
+
+        Returns:
+            Event ID from Redis stream
+        """
+        event_data = {
+            "prompt": prompt,
+            "timestamp": datetime.utcnow().isoformat(),
+            "reject_reason": reject_reason,
+            "rejected": "true",
+        }
+
+        if metadata:
+            event_data["metadata"] = json.dumps(metadata)
+
+        event_id = self.redis.xadd(
+            key=self.REJECTED_STREAM_KEY,
+            id="*",  # Auto-generate ID
+            data=event_data,
+            maxlen=self.MAX_STREAM_LENGTH
+        )
+
+        return event_id
+
     def get_recent_events(self, count: int = 10, stream_key: Optional[str] = None) -> List[Dict]:
         """
         Get recent events from the stream
@@ -130,6 +162,10 @@ class ContextBusClient:
         """Get recent filtered events from the memory bank"""
         return self.get_recent_events(count=count, stream_key=self.FILTERED_STREAM_KEY)
 
+    def get_rejected_events(self, count: int = 10) -> List[Dict]:
+        """Get recent rejected events from the filtered stream"""
+        return self.get_recent_events(count=count, stream_key=self.REJECTED_STREAM_KEY)
+
     def get_stream_info(self) -> Dict:
         """
         Get information about the streams
@@ -137,22 +173,32 @@ class ContextBusClient:
         Returns:
             Dictionary with stream stats
         """
-        try:
-            main_info = self.redis.xinfo_stream(self.STREAM_KEY)
-            filtered_info = self.redis.xinfo_stream(self.FILTERED_STREAM_KEY)
+        def safe_get_stream_length(stream_key: str) -> int:
+            """Safely get stream length, return 0 if stream doesn't exist"""
+            try:
+                # Use xlen (more reliable for Upstash Redis)
+                return self.redis.xlen(stream_key)
+            except Exception:
+                # Stream doesn't exist yet or other error
+                return 0
 
-            return {
-                "total_events": main_info.get("length", 0),
-                "filtered_events": filtered_info.get("length", 0),
-                "last_event_id": main_info.get("last-generated-id", "0-0"),
-            }
-        except Exception:
-            # Streams might not exist yet
-            return {
-                "total_events": 0,
-                "filtered_events": 0,
-                "last_event_id": "0-0",
-            }
+        def safe_get_last_id(stream_key: str) -> str:
+            """Safely get last generated ID, return 0-0 if stream doesn't exist"""
+            try:
+                # Get recent events to find last ID
+                events = self.redis.xrevrange(stream_key, "+", "-", count=1)
+                if events and len(events) > 0:
+                    return events[0][0]  # First element is the ID
+                return "0-0"
+            except Exception:
+                return "0-0"
+
+        return {
+            "total_events": safe_get_stream_length(self.STREAM_KEY),
+            "memory_events": safe_get_stream_length(self.FILTERED_STREAM_KEY),  # High-priority traffic
+            "filtered_events": safe_get_stream_length(self.REJECTED_STREAM_KEY),  # Rejected content
+            "last_event_id": safe_get_last_id(self.STREAM_KEY),
+        }
 
     def filter_and_store(self, prompt: str, should_filter: bool = True) -> tuple[str, Optional[str]]:
         """
@@ -195,4 +241,21 @@ class ContextBusClient:
             return True
         except Exception as e:
             print(f"Error deleting event {event_id}: {e}")
+            return False
+
+    def clear_rejected_stream(self) -> bool:
+        """
+        Clear all events from the rejected stream
+
+        Returns:
+            True if clearing was successful
+        """
+        try:
+            # Delete the entire stream (this removes all events)
+            # Redis XTRIM with MAXLEN 0 effectively clears the stream
+            self.redis.xtrim(self.REJECTED_STREAM_KEY, maxlen=0)
+            print(f"[Redis] Cleared all events from rejected stream: {self.REJECTED_STREAM_KEY}")
+            return True
+        except Exception as e:
+            print(f"Error clearing rejected stream: {e}")
             return False

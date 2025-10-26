@@ -89,8 +89,23 @@ export const Overview = () => {
         throw new Error("Failed to submit update");
       }
 
-      toast.success("Update reported successfully!");
+      const result = await response.json();
+
+      // Show enhanced success message with context
+      if (result.enhanced_summary) {
+        toast.success("Update with context generated successfully!", {
+          description: `Original: "${result.original_reference}"`
+        });
+      } else {
+        toast.success("Update reported successfully!");
+      }
+
       handleCloseModal();
+
+      // Refresh events to show the new update
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
     } catch (error) {
       console.error("Failed to submit update:", error);
       toast.error("Failed to submit update");
@@ -205,6 +220,25 @@ export const Overview = () => {
                           </span>
                         )}
                         {(() => {
+                          // Check if this is an update event
+                          try {
+                            const metadata = typeof event.metadata === 'string'
+                              ? JSON.parse(event.metadata)
+                              : event.metadata;
+
+                            if (metadata && metadata.type === 'update') {
+                              return (
+                                <span className="px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded text-xs flex items-center gap-1">
+                                  🔄 Update
+                                </span>
+                              );
+                            }
+                          } catch (e) {
+                            // Ignore parsing errors
+                          }
+                          return null;
+                        })()}
+                        {(() => {
                           // Check for coordinates in metadata
                           try {
                             const metadata = typeof event.metadata === 'string'
@@ -290,10 +324,18 @@ export const Overview = () => {
 
               {/* Original Event */}
               <div className="mb-6 p-4 bg-black/60 border border-nvidia-green/20 rounded-lg">
-                <div className="text-xs text-muted-foreground mb-2">Original Event:</div>
-                <div className="text-sm text-foreground">{selectedEvent.prompt}</div>
-                <div className="text-xs text-muted-foreground mt-2">
-                  {new Date(selectedEvent.timestamp).toLocaleString()}
+                <div className="text-xs text-muted-foreground mb-2 flex items-center gap-2">
+                  <span>Original Event:</span>
+                  <span className="px-2 py-0.5 bg-nvidia-green/20 text-nvidia-green rounded text-xs">
+                    Will be referenced in update
+                  </span>
+                </div>
+                <div className="text-sm text-foreground bg-black/40 p-3 rounded border-l-4 border-nvidia-green/50">
+                  "{selectedEvent.prompt}"
+                </div>
+                <div className="text-xs text-muted-foreground mt-2 flex items-center justify-between">
+                  <span>{new Date(selectedEvent.timestamp).toLocaleString()}</span>
+                  <span className="text-nvidia-cyan">Event ID: {selectedEvent.id.slice(-8)}</span>
                 </div>
               </div>
 
@@ -305,7 +347,7 @@ export const Overview = () => {
                 <textarea
                   value={updateReport}
                   onChange={(e) => setUpdateReport(e.target.value)}
-                  placeholder="Describe the update or current status of this event..."
+                  placeholder="Describe the current status, resolution, or new information about this incident. The system will automatically reference the original event when creating the update."
                   className="w-full min-h-[120px] resize-none rounded-lg border-2 border-nvidia-green/30 bg-black/60 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground shadow-inner backdrop-blur transition focus:border-nvidia-green focus:outline-none focus:ring-2 focus:ring-nvidia-green/40"
                 />
               </div>

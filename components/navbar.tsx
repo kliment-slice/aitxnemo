@@ -7,13 +7,16 @@ import { useState, useEffect } from "react";
 
 import { Button } from "./ui/button";
 import { API_URL } from "@/lib/api";
+import { MemoryBankDialog } from "./dialogs/memory-bank-dialog";
+import { FilteredEventsDialog } from "./dialogs/filtered-events-dialog";
 
 export const Navbar = () => {
   const pathname = usePathname();
   const isNewUserPage = pathname === "/new-user";
-  const [totalEvents, setTotalEvents] = useState(0);
-  const [filteredEvents, setFilteredEvents] = useState(0);
-  const [recentEventsCount, setRecentEventsCount] = useState(0);
+  const [memoryEventsCount, setMemoryEventsCount] = useState(0);
+  const [filteredEventsCount, setFilteredEventsCount] = useState(0);
+  const [showMemoryDialog, setShowMemoryDialog] = useState(false);
+  const [showFilteredDialog, setShowFilteredDialog] = useState(false);
 
   // Fetch context bus statistics
   useEffect(() => {
@@ -21,12 +24,8 @@ export const Navbar = () => {
       try {
         const statsRes = await fetch(`${API_URL}/api/context-bus/stats`);
         const stats = await statsRes.json();
-        setTotalEvents(stats.total_events || 0);
-        setFilteredEvents(stats.filtered_events || 0);
-
-        const eventsRes = await fetch(`${API_URL}/api/context-bus/filtered?count=5`);
-        const eventsData = await eventsRes.json();
-        setRecentEventsCount(eventsData.events?.length || 0);
+        setMemoryEventsCount(stats.memory_events || 0);  // High-priority traffic content
+        setFilteredEventsCount(stats.filtered_events || 0);  // Rejected/non-traffic content
       } catch (error) {
         console.error("Error fetching context bus stats:", error);
       }
@@ -58,7 +57,7 @@ export const Navbar = () => {
               <span className="text-[9px] md:text-[10px] bg-nvidia-green/20 text-nvidia-green px-1.5 md:px-2 py-0.5 rounded-full font-semibold">LIVE</span>
             </div>
             <p className="text-[10px] md:text-xs text-muted-foreground line-clamp-2 md:line-clamp-none">
-              Real-time agent for local traffic to demonstrate <span className="text-nvidia-green">Nemotron-9b-v2</span>'s ability to mitigate context degradation.
+              Real-time agent for local traffic demonstrating <span className="text-nvidia-green">Nemotron-9b-v2</span>'s ability to mitigate context degradation.
             </p>
             <p className="hidden lg:block text-xs text-muted-foreground">
               Powered by <span className="text-nvidia-green">NVIDIA</span>, <span className="text-blue-500">Toolhouse</span>, <span className="text-nvidia-cyan">ElevenLabs</span> & <span className="text-yellow-500">Google Cloud Platform</span>.
@@ -70,17 +69,19 @@ export const Navbar = () => {
         <div className="flex items-center justify-between md:justify-end gap-3 md:gap-4">
           {/* Context Bus Statistics */}
           <div className="flex items-center gap-2 md:gap-4">
-            <div className="text-center px-2 md:px-3 py-1 bg-nvidia-green/5 border border-nvidia-green/20 rounded-lg">
-              <div className="text-sm md:text-lg font-bold text-nvidia-green">{totalEvents}</div>
-              <div className="text-[8px] md:text-[10px] text-muted-foreground">Total</div>
+            <div
+              className="text-center px-2 md:px-3 py-1 bg-nvidia-purple/5 border border-nvidia-purple/20 rounded-lg cursor-pointer hover:bg-nvidia-purple/10 transition-colors"
+              onClick={() => setShowMemoryDialog(true)}
+            >
+              <div className="text-sm md:text-lg font-bold text-nvidia-purple">{memoryEventsCount}</div>
+              <div className="text-[8px] md:text-[10px] text-muted-foreground">Memory Bank</div>
             </div>
-            <div className="text-center px-2 md:px-3 py-1 bg-nvidia-cyan/5 border border-nvidia-cyan/20 rounded-lg">
-              <div className="text-sm md:text-lg font-bold text-nvidia-cyan">{filteredEvents}</div>
+            <div
+              className="text-center px-2 md:px-3 py-1 bg-red-500/5 border border-red-500/20 rounded-lg cursor-pointer hover:bg-red-500/10 transition-colors"
+              onClick={() => setShowFilteredDialog(true)}
+            >
+              <div className="text-sm md:text-lg font-bold text-red-400">{filteredEventsCount}</div>
               <div className="text-[8px] md:text-[10px] text-muted-foreground">Filtered</div>
-            </div>
-            <div className="hidden sm:block text-center px-2 md:px-3 py-1 bg-nvidia-purple/5 border border-nvidia-purple/20 rounded-lg">
-              <div className="text-sm md:text-lg font-bold text-nvidia-purple">{recentEventsCount}</div>
-              <div className="text-[8px] md:text-[10px] text-muted-foreground">Memory</div>
             </div>
           </div>
 
@@ -95,6 +96,16 @@ export const Navbar = () => {
           </Button>
         </div>
       </div>
+
+      {/* Dialogs */}
+      <MemoryBankDialog
+        open={showMemoryDialog}
+        onOpenChange={setShowMemoryDialog}
+      />
+      <FilteredEventsDialog
+        open={showFilteredDialog}
+        onOpenChange={setShowFilteredDialog}
+      />
     </div>
   );
 };

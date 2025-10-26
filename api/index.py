@@ -48,7 +48,7 @@ app.add_middleware(
 context_bus = None
 
 COSMOS_MODEL = "nvidia/vila"
-NEMOTRON_MODEL = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+NEMOTRON_MODEL = "nvidia/nvidia-nemotron-nano-9b-v2"
 TOOLHOUSE_AGENT_URL = os.getenv("TOOLHOUSE_AGENT_URL", None)
 
 
@@ -366,7 +366,10 @@ async def trigger_toolhouse_agent(
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    # Increase timeout and add connection pooling for better reliability
+    timeout_config = httpx.Timeout(timeout=120.0, connect=30.0)
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    async with httpx.AsyncClient(timeout=timeout_config, limits=limits) as client:
         try:
             # Call the Toolhouse agent streaming API
             response = await client.post(
@@ -412,11 +415,12 @@ async def root():
 async def speech_to_text(audio: UploadFile = File(...)):
     """Convert speech to text using ElevenLabs STT API"""
     import tempfile
+    import os as os_module
 
     # Use ElevenLabs for speech-to-text
     elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
     if not elevenlabs_api_key:
-        raise ValueError("ELEVENLABS_API_KEY not found in environment variables")
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not found in environment variables")
 
     client = ElevenLabs(api_key=elevenlabs_api_key)
 
@@ -427,48 +431,173 @@ async def speech_to_text(audio: UploadFile = File(...)):
     if len(audio_data) == 0:
         raise HTTPException(status_code=400, detail="No audio data received")
 
-    # Determine file extension based on content type
+    # Enhanced audio validation
+    if len(audio_data) < 1000:  # Less than 1KB is likely too short
+        raise HTTPException(status_code=400, detail="Audio data too short - may be empty or corrupted")
+
+    # Determine file extension and content type with better detection
     content_type = audio.content_type or ""
-    if "webm" in content_type:
-        suffix = ".webm"
-    elif "mp4" in content_type or "mp4a" in content_type:
-        suffix = ".mp4"
-    elif "mpeg" in content_type or "mp3" in content_type:
-        suffix = ".mp3"
-    elif "wav" in content_type:
+    print(f"[STT] Received audio: size={len(audio_data)} bytes, content_type='{content_type}'")
+
+    # More specific content type handling prioritizing STT-friendly formats
+    content_lower = content_type.lower()
+    if "wav" in content_lower:
         suffix = ".wav"
+        mime_type = "audio/wav"
+    elif "mp4" in content_lower or "m4a" in content_lower:
+        suffix = ".m4a"
+        mime_type = "audio/mp4"
+    elif "mpeg" in content_lower or "mp3" in content_lower:
+        suffix = ".mp3"
+        mime_type = "audio/mpeg"
+    elif "webm" in content_lower:
+        suffix = ".webm"
+        mime_type = "audio/webm"
+    elif "ogg" in content_lower:
+        suffix = ".ogg"
+        mime_type = "audio/ogg"
     else:
-        suffix = ".webm"  # default
+        # Default to MP4 for better STT compatibility
+        suffix = ".m4a"
+        mime_type = "audio/mp4"
+        print(f"[STT] Unknown content type '{content_type}', defaulting to MP4/M4A for better STT compatibility")
 
-    # Save to temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-        temp_file.write(audio_data)
-        temp_file.flush()
-        temp_file_path = temp_file.name
-
+    # Create temp file with proper extension
+    temp_file_path = None
     try:
-        # Use ElevenLabs STT API - pass filename with extension
-        with open(temp_file_path, "rb") as audio_file:
-            result = client.speech_to_text.convert(
-                model_id="scribe_v1",
-                file=(f"recording{suffix}", audio_file, content_type or "audio/webm")
-            )
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(audio_data)
+            temp_file.flush()
+            temp_file_path = temp_file.name
 
-        return {"text": result.text}
+        print(f"[STT] Created temp file: {temp_file_path} with suffix {suffix}")
+
+        # Try different approaches for ElevenLabs API with progressive fallback
+        result = None
+        last_error = None
+
+        # List of models to try in order of preference
+        models_to_try = [
+            ("turbo_v2", "Latest turbo model"),
+            ("turbo_v2.5", "Enhanced turbo model v2.5"),
+            ("scribe_english_v2", "English-optimized model v2"),
+            ("scribe_v1", "Original scribe model"),
+            (None, "Default model")
+        ]
+
+        for model_id, description in models_to_try:
+            try:
+                print(f"[STT] Trying {description} (model_id: {model_id})...")
+
+                with open(temp_file_path, "rb") as audio_file:
+                    if model_id:
+                        result = client.speech_to_text.convert(
+                            model_id=model_id,
+                            file=(f"recording{suffix}", audio_file, mime_type)
+                        )
+                    else:
+                        # Try without specifying model (uses default)
+                        result = client.speech_to_text.convert(
+                            file=(f"recording{suffix}", audio_file, mime_type)
+                        )
+
+                print(f"[STT] Success with {description}: '{result.text}'")
+                break  # Success, stop trying other models
+
+            except Exception as e:
+                last_error = e
+                print(f"[STT] {description} failed: {str(e)[:200]}...")
+                continue  # Try next model
+
+        if result is None:
+            print(f"[STT] All models failed. Last error: {last_error}")
+            raise last_error or Exception("All STT models failed")
+
+        # Validate the result
+        if not result or not hasattr(result, 'text'):
+            raise HTTPException(status_code=500, detail="ElevenLabs returned empty result")
+
+        transcribed_text = result.text.strip() if result.text else ""
+
+        # Check for common error patterns in transcription that indicate poor audio quality
+        error_patterns = [
+            "(clicking noise)",
+            "(background noise)",
+            "(inaudible)",
+            "eleven louse",
+            "elevenlouse",
+            "11 louse",
+            "eleven labs",
+            "eleven lab",
+            "test test test",
+            "...",
+            "unintelligible",
+            "unclear audio",
+            "static",
+            "silence"
+        ]
+
+        # Also check for very short or repetitive transcriptions that might indicate issues
+        suspicious_patterns = [
+            "a",
+            "the",
+            "and",
+            "uh",
+            "um",
+            "ah"
+        ]
+
+        text_lower = transcribed_text.lower().strip()
+
+        # Check for obvious error patterns
+        if any(pattern in text_lower for pattern in error_patterns):
+            print(f"[STT] Warning: Detected error pattern in transcription: '{transcribed_text}'")
+            # Don't reject, but log the issue
+
+        # Check for suspiciously short single-word transcriptions
+        words = transcribed_text.strip().split()
+        if len(words) == 1 and words[0].lower() in suspicious_patterns:
+            print(f"[STT] Warning: Suspiciously short transcription (single word): '{transcribed_text}'")
+            print("[STT] This might indicate poor audio quality or very short recording")
+
+        # Check for very short transcriptions that might be spurious
+        if len(transcribed_text.strip()) < 3:
+            print(f"[STT] Warning: Very short transcription: '{transcribed_text}' - may indicate audio issues")
+
+        if len(transcribed_text) == 0:
+            print("[STT] Warning: Empty transcription result")
+            return {"text": "", "warning": "Empty transcription - audio may be silent or too short"}
+
+        print(f"[STT] Final transcription: '{transcribed_text}'")
+        return {"text": transcribed_text}
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        # Log the error for debugging
-        print(f"STT Error: {str(e)}")
-        print(f"Audio size: {len(audio_data)} bytes")
-        print(f"Content type: {content_type}")
+        # Log detailed error information
+        print(f"[STT] Unexpected error: {str(e)}")
+        print(f"[STT] Audio size: {len(audio_data)} bytes")
+        print(f"[STT] Content type: {content_type}")
+        print(f"[STT] Detected MIME type: {mime_type}")
+        print(f"[STT] File suffix: {suffix}")
+
+        # Import traceback for detailed error logging
+        import traceback
+        traceback.print_exc()
+
         raise HTTPException(
             status_code=500,
-            detail=f"Speech-to-text failed: {str(e)}"
+            detail=f"Speech-to-text conversion failed: {str(e)}"
         )
     finally:
         # Clean up temp file
-        import os as os_module
-        if os_module.path.exists(temp_file_path):
-            os_module.unlink(temp_file_path)
+        if temp_file_path and os_module.path.exists(temp_file_path):
+            try:
+                os_module.unlink(temp_file_path)
+                print(f"[STT] Cleaned up temp file: {temp_file_path}")
+            except Exception as cleanup_error:
+                print(f"[STT] Failed to cleanup temp file: {cleanup_error}")
 
 
 @app.get("/api/context-bus/events")
@@ -501,6 +630,25 @@ async def get_filtered_events(count: int = Query(10, ge=1, le=100)):
                 content={"error": "Context bus not available"}
             )
         events = bus.get_filtered_events(count=count)
+        return {"events": events, "count": len(events)}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+@app.get("/api/context-bus/rejected")
+async def get_rejected_events(count: int = Query(10, ge=1, le=100)):
+    """Get recent rejected events from the filtered stream"""
+    try:
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+        events = bus.get_rejected_events(count=count)
         return {"events": events, "count": len(events)}
     except Exception as e:
         return JSONResponse(
@@ -577,76 +725,251 @@ async def process_traffic_intake(
     # Build a text representation of the content for the summary
     text_content = text.strip() if text.strip() else "Traffic report with attachments"
 
-    # Try to get AI summary, but continue if it fails
-    cosmos_summary = text_content
-    try:
-        cosmos_response = client.chat.completions.create(
-            model=COSMOS_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"{text_content}\n\n"
-                        "Summarize this traffic report in under 120 words. "
-                        "Identify the location, root cause, lanes or routes affected, "
-                        "and immediate operational recommendations."
-                    ),
+    # PRE-FILTER: Check if content is traffic-related using Nemotron
+    # SECURITY: Default to FALSE - content must PROVE it's traffic-related
+    is_traffic_related = False
+    traffic_relevance_reason = "Default rejection for security"
+
+    # Enhanced keyword check - look for meaningful traffic context, not just words
+    # First check for obvious non-traffic phrases that should be rejected
+    reject_phrases = [
+        'bogus', 'non traffic', 'not traffic', 'fake', 'test message', 'spam',
+        'hello', 'hi there', 'how are you', 'almost done', 'i\'m done', 'finished'
+    ]
+
+    # Real traffic keywords that indicate legitimate traffic content
+    traffic_keywords = [
+        # Incidents
+        'accident', 'crash', 'collision', 'wreck', 'fender bender',
+        # Blockages
+        'blocking', 'blocked', 'stalled', 'disabled', 'breakdown', 'stuck',
+        # Construction & Infrastructure
+        'construction', 'road work', 'lane closure', 'closure', 'closed',
+        # Traffic Conditions
+        'congestion', 'jam', 'backup', 'slow', 'heavy traffic', 'delay',
+        'detour', 'alternate route',
+        # Vehicles & Objects
+        'truck', 'car', 'vehicle', 'bus', 'motorcycle', 'debris', 'pothole',
+        # Roads & Locations
+        'intersection', 'street', 'road', 'highway', 'freeway', 'lane',
+        'bridge', 'tunnel', 'exit', 'ramp', 'overpass',
+        # Austin Specific
+        'i-35', 'mopac', '183', '290', 'loop', 'toll', 'downtown', 'austin',
+        'lavaca', 'congress', 'guadalupe', 'lamar', 'burnet'
+    ]
+
+    text_lower = text_content.lower()
+
+    # First check for obvious rejection patterns
+    has_reject_phrases = any(phrase in text_lower for phrase in reject_phrases)
+
+    # Then check for legitimate traffic keywords (require more specific context)
+    has_traffic_keywords = any(keyword in text_lower for keyword in traffic_keywords)
+
+    if has_reject_phrases:
+        print(f"[Keyword Filter] Reject phrases detected in: '{text_content[:50]}...'")
+        has_traffic_keywords = False
+    elif not has_traffic_keywords:
+        print(f"[Keyword Filter] No specific traffic keywords found in: '{text_content[:50]}...'")
+        has_traffic_keywords = False
+
+    if not has_traffic_keywords:
+        print(f"[Keyword Filter] REJECTED - No traffic keywords found in: '{text_content[:50]}...'")
+        is_traffic_related = False
+        traffic_relevance_reason = "No traffic keywords detected - immediate rejection"
+    else:
+        print("[Keyword Filter] PASSED - Traffic keywords found, proceeding with AI filter")
+
+    # Only call AI filter if keywords were found
+    if has_traffic_keywords:
+        try:
+            relevance_prompt = (
+            "You are a STRICT traffic relevance filter. Your job is to REJECT anything that is not clearly traffic-related. "
+            "ONLY ACCEPT content that explicitly mentions: roads, traffic, accidents, construction, vehicles, "
+            "intersections, highways, streets, lanes, congestion, detours, road closures, traffic lights, "
+            "parking, transportation incidents, or specific traffic-related locations.\n\n"
+            "REJECT ALL content that is:\n"
+            "- General conversation (\"i'm almost done\", \"hello\", \"how are you\")\n"
+            "- Status updates without traffic context\n"
+            "- Test messages or random text\n"
+            "- Personal messages or chat\n"
+            "- Spam or irrelevant content\n"
+            "- Anything without clear traffic/transportation context\n\n"
+            "Return ONLY a JSON object: {\"is_traffic_related\": boolean, \"reason\": \"explanation\"}\n\n"
+            f"Content to evaluate: \"{text_content}\"\n\n"
+            "Is this clearly about traffic/transportation? Be STRICT - when in doubt, REJECT."
+        )
+
+            relevance_response = client.chat.completions.create(
+                model=NEMOTRON_MODEL,
+                messages=[
+                    {"role": "system", "content": "/think"},
+                    {
+                        "role": "user",
+                        "content": relevance_prompt,
+                    }
+                ],
+                temperature=0.6,
+                top_p=0.95,
+                max_tokens=150,
+                frequency_penalty=0,
+                presence_penalty=0,
+                extra_body={
+                    "min_thinking_tokens": 1024,
+                    "max_thinking_tokens": 2048
                 }
-            ],
-            temperature=0.2,
-            max_tokens=512,
-        )
-        cosmos_summary = cosmos_response.choices[0].message.content.strip() if cosmos_response.choices else text_content
-    except Exception as e:
-        print(f"Warning: Cosmos summary failed: {e}")
-        cosmos_summary = text_content
+            )
 
-    # Default evaluation payload
-    evaluation_payload = {
-        "include_in_context": True,
-        "severity": "medium",
-        "summary": cosmos_summary,
-        "reason": "Traffic report submitted by operator"
-    }
+            # Safely extract response content with proper null checks
+            relevance_text = ""
+            if relevance_response and relevance_response.choices and len(relevance_response.choices) > 0:
+                if relevance_response.choices[0].message and relevance_response.choices[0].message.content:
+                    relevance_text = relevance_response.choices[0].message.content
 
-    # Try to get AI evaluation, but use defaults if it fails
-    try:
-        evaluation_prompt = (
-            "You are the NVIDIA Nemotron Nano-9B traffic incident evaluator. "
-            "Determine whether the following report requires escalation into the Context Highway. "
-            "Return a JSON object with keys: include_in_context (boolean), severity (low|medium|high), "
-            "summary (refined concise synopsis), and reason (short explanation). "
-            "Report:\n"
-            f"{cosmos_summary}\n\n"
-            "Original Text:\n"
-            f"{text.strip() or 'N/A'}"
-        )
+            print(f"[AI Filter] Raw response: {relevance_text[:200] if relevance_text else 'Empty response'}...")
 
-        evaluation_response = client.chat.completions.create(
-            model=NEMOTRON_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": evaluation_prompt,
+            if not relevance_text:
+                # Empty response from AI - default to accepting since keywords passed
+                print("[AI Filter] Empty response from Nemotron, but keywords passed - defaulting to ACCEPT")
+                is_traffic_related = True
+                traffic_relevance_reason = "AI returned empty response but keywords detected - accepted"
+            else:
+                relevance_data = extract_json_block(relevance_text)
+                print(f"[AI Filter] Parsed JSON: {relevance_data}")
+
+                if relevance_data and "is_traffic_related" in relevance_data:
+                    # Only set to True if AI explicitly confirms it's traffic-related
+                    ai_says_traffic = bool(relevance_data.get("is_traffic_related", False))
+                    if ai_says_traffic:
+                        is_traffic_related = True
+                        traffic_relevance_reason = relevance_data.get("reason", "AI confirmed traffic-related")
+                    else:
+                        is_traffic_related = False
+                        traffic_relevance_reason = relevance_data.get("reason", "AI rejected as non-traffic")
+                else:
+                    # If keywords passed but AI failed, default to ACCEPTING for obvious traffic keywords
+                    print("[AI Filter] JSON parsing failed, but keywords passed - defaulting to ACCEPT")
+                    is_traffic_related = True
+                    traffic_relevance_reason = f"AI parsing failed but keywords detected - accepted (raw: {relevance_text[:100]})"
+
+            print(f"[AI Filter] Content: '{text_content[:50]}...' | Relevant: {is_traffic_related} | Reason: {traffic_relevance_reason}")
+
+        except Exception as e:
+            print(f"Warning: Traffic relevance filter failed: {e}")
+            # If keywords passed but AI failed, default to ACCEPTING since keywords are reliable
+            is_traffic_related = True
+            traffic_relevance_reason = f"AI error but keywords detected - accepted ({str(e)[:50]})"
+
+    # Only generate AI summary for traffic-related content using Nemotron-9B-v2
+    nemotron_summary = text_content
+    if is_traffic_related:
+        try:
+            print("[Nemotron] Generating summary for traffic-related content")
+            nemotron_response = client.chat.completions.create(
+                model=NEMOTRON_MODEL,
+                messages=[
+                    {"role": "system", "content": "/think"},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"You are the NVIDIA Nemotron traffic incident summarizer. "
+                            f"Summarize this traffic report in under 120 words. "
+                            f"Identify the location, root cause, lanes or routes affected, "
+                            f"and immediate operational recommendations.\n\n"
+                            f"Traffic Report:\n{text_content}"
+                        ),
+                    }
+                ],
+                temperature=0.6,
+                top_p=0.95,
+                max_tokens=512,
+                frequency_penalty=0,
+                presence_penalty=0,
+                extra_body={
+                    "min_thinking_tokens": 1024,
+                    "max_thinking_tokens": 2048
                 }
-            ],
-            temperature=0.1,
-            max_tokens=256,
-        )
+            )
+            nemotron_summary = nemotron_response.choices[0].message.content.strip() if nemotron_response.choices else text_content
+        except Exception as e:
+            print(f"Warning: Nemotron summary failed: {e}")
+            nemotron_summary = text_content
+    else:
+        # For non-traffic content, use the original text without AI processing
+        nemotron_summary = f"[NON-TRAFFIC]: {text_content}"
+        print("[Nemotron] Skipping AI summary generation for non-traffic content")
 
-        evaluation_text = evaluation_response.choices[0].message.content if evaluation_response.choices else ""
-        parsed_payload = extract_json_block(evaluation_text)
-        if parsed_payload:
-            evaluation_payload = parsed_payload
-    except Exception as e:
-        print(f"Warning: Nemotron evaluation failed: {e}")
-        # evaluation_payload already has defaults
+    # Determine initial routing based on traffic relevance
+    if not is_traffic_related:
+        # Non-traffic content goes directly to Filtered, not Memory
+        evaluation_payload = {
+            "include_in_context": False,  # Force to Filtered only
+            "severity": "irrelevant",
+            "summary": f"[FILTERED - Non-traffic content]: {nemotron_summary}",
+            "reason": f"Content rejected by traffic filter: {traffic_relevance_reason}"
+        }
+        print("[Traffic Filter] Content marked as irrelevant - will only go to Filtered stream")
+    else:
+        # Default evaluation payload for traffic-related content
+        evaluation_payload = {
+            "include_in_context": True,
+            "severity": "medium",
+            "summary": nemotron_summary,
+            "reason": "Traffic report submitted by operator"
+        }
+
+        # Try to get AI evaluation for traffic-related content, but use defaults if it fails
+        try:
+            evaluation_prompt = (
+                "You are the NVIDIA Nemotron Nano-9B traffic incident evaluator. "
+                "Determine whether the following report requires escalation into the Context Highway. "
+                "Return a JSON object with keys: include_in_context (boolean), severity (low|medium|high), "
+                "summary (refined concise synopsis), and reason (short explanation). "
+                "Report:\n"
+                f"{nemotron_summary}\n\n"
+                "Original Text:\n"
+                f"{text.strip() or 'N/A'}"
+            )
+
+            evaluation_response = client.chat.completions.create(
+                model=NEMOTRON_MODEL,
+                messages=[
+                    {"role": "system", "content": "/think"},
+                    {
+                        "role": "user",
+                        "content": evaluation_prompt,
+                    }
+                ],
+                temperature=0.6,
+                top_p=0.95,
+                max_tokens=256,
+                frequency_penalty=0,
+                presence_penalty=0,
+                extra_body={
+                    "min_thinking_tokens": 1024,
+                    "max_thinking_tokens": 2048
+                }
+            )
+
+            evaluation_text = evaluation_response.choices[0].message.content if evaluation_response.choices else ""
+            parsed_payload = extract_json_block(evaluation_text)
+            if parsed_payload:
+                # Merge AI evaluation with defaults, ensuring traffic-related content defaults to include_in_context=True
+                parsed_payload.setdefault("include_in_context", True)
+                parsed_payload.setdefault("severity", "medium")
+                parsed_payload.setdefault("summary", nemotron_summary)
+                parsed_payload.setdefault("reason", "Traffic report submitted by operator")
+                evaluation_payload.update(parsed_payload)
+                print(f"[AI Evaluation] Merged payload: include_in_context={evaluation_payload.get('include_in_context')}, severity={evaluation_payload.get('severity')}")
+        except Exception as e:
+            print(f"Warning: Nemotron evaluation failed: {e}")
+            # evaluation_payload already has defaults
 
     include_flag = bool(evaluation_payload.get("include_in_context"))
     severity = str(evaluation_payload.get("severity", "unknown")).lower()
-    if severity not in {"low", "medium", "high"}:
+    if severity not in {"low", "medium", "high", "irrelevant"}:
         severity = "unknown"
-    refined_summary = evaluation_payload.get("summary") or cosmos_summary
+    refined_summary = evaluation_payload.get("summary") or nemotron_summary
     rationale = evaluation_payload.get("reason") or "No rationale provided."
 
     main_event_id: Optional[str] = None
@@ -659,11 +982,10 @@ async def process_traffic_intake(
         "source": "traffic-intake",
     }
 
-    # Always try to extract coordinates from the text using Toolhouse agent
-    # This ensures we get the location mentioned in the report, not the user's GPS location
+    # Only try to extract coordinates for traffic-related content
     extracted_coords = None
-    if text.strip():
-        print(f"[Toolhouse] Calling agent to extract coordinates from text: {text[:100]}...")
+    if text.strip() and is_traffic_related:
+        print(f"[Toolhouse] Calling agent to extract coordinates from traffic-related text: {text[:100]}...")
         toolhouse_coord_result = await trigger_toolhouse_agent(
             summary=refined_summary,
             severity=severity,
@@ -693,26 +1015,52 @@ async def process_traffic_intake(
             print(f"⚠ Toolhouse call failed with status: {toolhouse_coord_result.get('status')}")
             if latitude and longitude:
                 print(f"⚠ Falling back to user GPS coordinates: {latitude}, {longitude}")
+    else:
+        print("[Toolhouse] Skipping coordinate extraction - content is not traffic-related")
 
-    # Add coordinates to metadata if available
-    if latitude and longitude:
+    # Add coordinates to metadata ONLY for traffic-related content
+    if latitude and longitude and is_traffic_related:
         context_metadata["latitude"] = latitude
         context_metadata["longitude"] = longitude
+        print(f"[Metadata] Added coordinates for traffic-related content: {latitude}, {longitude}")
+    elif latitude and longitude and not is_traffic_related:
+        print(f"[Metadata] Suppressing coordinates for non-traffic content: {latitude}, {longitude}")
+    else:
+        print("[Metadata] No coordinates to add")
 
     bus = get_context_bus()
     if bus:
         try:
+            # Always add to main event stream for audit purposes
             main_event_id = bus.add_event(
                 prompt=refined_summary,
                 user_id=display_name or None,
                 metadata=context_metadata,
             )
-            if include_flag:
+
+            # Routing logic based on traffic relevance and AI evaluation
+            if not is_traffic_related:
+                # Non-traffic content: Goes to audit + rejected stream (increments "Filtered" counter)
+                rejected_event_id = bus.add_rejected_event(
+                    prompt=refined_summary,
+                    reject_reason=f"NON-TRAFFIC: {rationale}",
+                    metadata=context_metadata,
+                )
+                filtered_event_id = None
+                print(f"[Context Bus] Non-traffic content routed to rejected stream: {rejected_event_id}")
+            elif include_flag:
+                # Traffic-related content that passed AI evaluation: Goes to Memory (filtered stream)
                 filtered_event_id = bus.add_filtered_event(
                     prompt=refined_summary,
                     filter_reason=rationale,
                     metadata=context_metadata,
                 )
+                print(f"[Context Bus] Traffic content routed to Memory (filtered stream) - ID: {filtered_event_id}")
+                print("[Memory Bank] ✓ COUNTER SHOULD INCREMENT - New event added to memory bank")
+            else:
+                # Traffic-related but low priority: Also skip filtered stream
+                filtered_event_id = None
+                print("[Context Bus] Low-priority traffic content - audit only")
         except Exception as exc:
             print(f"Warning: Failed to store traffic intake in context bus: {exc}")
 
@@ -731,15 +1079,22 @@ async def process_traffic_intake(
             "toolhouse_status": toolhouse_result.get("status"),
             "toolhouse_run_id": toolhouse_result.get("run_id"),
             "toolhouse_last_checked": datetime.now().isoformat(),
+            "is_traffic_related": is_traffic_related,
+            "traffic_filter_reason": traffic_relevance_reason,
         }
     )
 
     return {
         "success": True,
         "evaluation": evaluation_payload,
-        "cosmos_summary": cosmos_summary,
+        "nemotron_summary": nemotron_summary,
         "attachments": attachment_meta,
         "toolhouse": toolhouse_result,
+        "traffic_filtering": {
+            "is_traffic_related": is_traffic_related,
+            "filter_reason": traffic_relevance_reason,
+            "routing_decision": "Memory" if (is_traffic_related and include_flag) else "Filtered only"
+        }
     }
 
 
@@ -786,30 +1141,74 @@ async def flag_event(request: FlagEventRequest):
                 content={"error": "Context bus not available"}
             )
 
-        # Add the update as a new event to the context bus
+        # Generate a comprehensive update summary using Nemotron
+        try:
+            client = get_nvidia_client()
+
+            # Create a prompt for Nemotron to generate a contextual update
+            summary_prompt = (
+                "You are the NVIDIA Nemotron traffic update summarizer. "
+                "Generate a concise update report that references the original incident. "
+                "Format your response as a single paragraph that includes:\n"
+                "1. A brief quote or reference to the original incident\n"
+                "2. The new update information\n"
+                "3. Current status or implications\n\n"
+                f"ORIGINAL INCIDENT: \"{request.original_prompt}\"\n\n"
+                f"UPDATE REPORT: \"{request.update}\"\n\n"
+                "Generate a contextual summary that clearly connects the update to the original incident:"
+            )
+
+            summary_response = client.chat.completions.create(
+                model=NEMOTRON_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": summary_prompt,
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=300,
+            )
+
+            enhanced_summary = summary_response.choices[0].message.content if summary_response.choices else None
+
+        except Exception as e:
+            print(f"Warning: Nemotron summary generation failed: {e}")
+            # Fallback to basic format
+            enhanced_summary = f"UPDATE regarding \"{request.original_prompt[:100]}{'...' if len(request.original_prompt) > 100 else ''}\": {request.update}"
+
+        # Use enhanced summary if available, otherwise use fallback
+        update_prompt = enhanced_summary or f"UPDATE: {request.update}"
+
+        # Add the update as a new event to the context bus with enhanced metadata
         update_metadata = {
             "type": "update",
             "original_event_id": request.event_id,
             "original_prompt": request.original_prompt,
-            "source": "flag-update"
+            "raw_update": request.update,
+            "enhanced_summary": enhanced_summary,
+            "source": "flag-update",
+            "timestamp": datetime.now().isoformat()
         }
 
         update_id = bus.add_event(
-            prompt=f"UPDATE: {request.update}",
+            prompt=update_prompt,
             metadata=update_metadata
         )
 
         # Also add to filtered stream
         filtered_id = bus.add_filtered_event(
-            prompt=f"UPDATE: {request.update}",
-            filter_reason="event_update",
+            prompt=update_prompt,
+            filter_reason="event_update_with_context",
             metadata=update_metadata
         )
 
         return {
             "success": True,
             "update_id": update_id,
-            "filtered_id": filtered_id
+            "filtered_id": filtered_id,
+            "enhanced_summary": enhanced_summary,
+            "original_reference": request.original_prompt[:100] + ("..." if len(request.original_prompt) > 100 else "")
         }
     except Exception as e:
         return JSONResponse(
@@ -846,6 +1245,42 @@ async def archive_event(request: ArchiveEventRequest):
             "success": True,
             "event_id": request.event_id,
             "message": "Event permanently deleted from context bus"
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+@app.delete("/api/context-bus/rejected/all")
+async def delete_all_rejected_events():
+    """Delete all rejected events from the rejected stream"""
+    try:
+        bus = get_context_bus()
+        if bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Context bus not available"}
+            )
+
+        # Get count before deletion
+        events_before = bus.get_rejected_events(count=1000)  # Get a large number to count all
+        count_before = len(events_before)
+
+        # Delete all events from rejected stream
+        success = bus.clear_rejected_stream()
+
+        if not success:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Failed to clear rejected events stream"}
+            )
+
+        return {
+            "success": True,
+            "deleted_count": count_before,
+            "message": f"Successfully deleted {count_before} rejected events"
         }
     except Exception as e:
         return JSONResponse(

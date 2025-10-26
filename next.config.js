@@ -25,6 +25,14 @@ const nextConfig = {
       },
     ];
   },
+  // Increase timeout for API routes to handle longer processing times
+  experimental: {
+    proxyTimeout: 300_000, // 5 minutes in milliseconds
+  },
+  // Configure server timeouts for better connection handling
+  serverRuntimeConfig: {
+    proxyTimeoutMs: 300_000, // 5 minutes
+  },
 };
 
 module.exports = nextConfig;
